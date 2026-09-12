@@ -1,0 +1,95 @@
+# Delivery-пак: Laravel 12 + Vue 3 SPA + MySQL 8 + воркер очереди.
+# Запуск из каталога delivery/: docker compose up --build -d
+# Подробнее — в README.md (раздел «Быстрый старт (docker-compose)»).
+
+services:
+  app:
+    build:
+      context: ./app
+      dockerfile: ../docker/php/Dockerfile
+    container_name: yandexparser-app
+    restart: unless-stopped
+    volumes:
+      # storage переживает пересборку; остальной код — из образа.
+      - app-storage:/var/www/storage
+    env_file:
+      - ./app/.env
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - appnet
+
+  web:
+    image: nginx:alpine
+    container_name: yandexparser-web
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - ./app:/var/www:ro
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - app
+    networks:
+      - appnet
+
+  db:
+    image: mysql:8
+    container_name: yandexparser-db
+    restart: unless-stopped
+    command: --default-authentication-plugin=mysql_native_password
+    volumes:
+      - dbdata:/var/lib/mysql
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE:-yandexparser}
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-secret}
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_PASSWORD:-secret}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - appnet
+
+  # Воркер очереди: ОБЯЗАТЕЛЕН, иначе парсинг не выполняется
+  # (статус навсегда останется «в очереди»). Перезапускать после деплоя
+  # не нужно — compose пересоздаёт контейнер с новым кодом.
+  worker:
+    build:
+      context: ./app
+      dockerfile: ../docker/php/Dockerfile
+    container_name: yandexparser-worker
+    restart: unless-stopped
+    command: php artisan queue:work --tries=3 --sleep=3
+    volumes:
+      - app-storage:/var/www/storage
+    env_file:
+      - ./app/.env
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - appnet
+
+  # Профиль headless (Node + Playwright) — только при смене контракта JSON
+  # или блокировках. Включается флагом YANDEX_MAPS_HEADLESS_ENABLED=true
+  # и командой: docker compose --profile headless up --build -d
+  headless:
+    image: mcr.microsoft.com/playwright:v1.49.0-noble
+    container_name: yandexparser-headless
+    profiles: ["headless"]
+    volumes:
+      - ./app/resources/headless:/work:ro
+    working_dir: /work
+    command: node fetch.mjs --help
+    networks:
+      - appnet
+
+volumes:
+  app-storage:
+  dbdata:
+
+networks:
+  appnet:
+    driver: bridge
